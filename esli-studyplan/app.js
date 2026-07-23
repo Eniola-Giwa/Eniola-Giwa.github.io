@@ -724,6 +724,13 @@ function curriculumEntries() {
   return entries;
 }
 
+function lineLength(entry) {
+  if (!entry) return 0;
+  if (Array.isArray(entry.uci) && entry.uci.length) return entry.uci.length;
+  if (entry.plyEstimate) return entry.plyEstimate;
+  return plyFromPgn(entry.pgn);
+}
+
 function scoreMatch(entry, tokens) {
   if (!tokens.length) return 0;
   const hay = entry.search || "";
@@ -736,8 +743,19 @@ function scoreMatch(entry, tokens) {
     if ((entry.eco || "").toLowerCase() === token) score += 10;
   }
   if (entry.source === "curriculum") score += 4;
-  score += Math.max(0, 6 - Math.floor((entry.name || "").length / 18));
   return score;
+}
+
+function rankSearchHits(rows) {
+  return rows
+    .filter((row) => row.score >= 0)
+    .sort((a, b) => {
+      const lenDiff = lineLength(b.entry) - lineLength(a.entry);
+      if (lenDiff) return lenDiff;
+      if (b.score !== a.score) return b.score - a.score;
+      return a.entry.name.localeCompare(b.entry.name);
+    })
+    .map((row) => row.entry);
 }
 
 function snapshotBoardState() {
@@ -968,8 +986,8 @@ function renderSearchResults(matches, query, total) {
   const count = document.createElement("li");
   count.className = "or-count";
   count.textContent = total > matches.length
-    ? `Showing ${matches.length} of ${total.toLocaleString()} matches · ↑↓ to read`
-    : `${matches.length} match${matches.length === 1 ? "" : "es"} · ↑↓ to read`;
+    ? `Showing ${matches.length} of ${total.toLocaleString()} matches · longest lines first`
+    : `${matches.length} match${matches.length === 1 ? "" : "es"} · longest lines first`;
   el.openingResults.appendChild(count);
 
   matches.forEach((entry, idx) => {
@@ -1005,22 +1023,18 @@ async function runOpeningSearch(rawQuery) {
     return;
   }
 
-  const local = curriculumEntries()
-    .map((entry) => ({ entry, score: scoreMatch(entry, tokens) }))
-    .filter((row) => row.score >= 0)
-    .sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
-    .map((row) => row.entry);
+  const local = rankSearchHits(
+    curriculumEntries().map((entry) => ({ entry, score: scoreMatch(entry, tokens) })),
+  );
 
   renderSearchStatus(`Searching ${DB_LABEL}…`);
   let eco = [];
   try {
     const catalog = await ensureEcoCatalog();
     if (state.searchQuery !== query) return;
-    eco = catalog
-      .map((entry) => ({ entry, score: scoreMatch(entry, tokens) }))
-      .filter((row) => row.score >= 0)
-      .sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
-      .map((row) => row.entry);
+    eco = rankSearchHits(
+      catalog.map((entry) => ({ entry, score: scoreMatch(entry, tokens) })),
+    );
   } catch {
     if (state.searchQuery !== query) return;
     if (!local.length) {
@@ -1039,6 +1053,11 @@ async function runOpeningSearch(rawQuery) {
     seen.add(key);
     merged.push(entry);
   }
+  merged.sort((a, b) => {
+    const lenDiff = lineLength(b) - lineLength(a);
+    if (lenDiff) return lenDiff;
+    return a.name.localeCompare(b.name);
+  });
   renderSearchResults(merged.slice(0, SEARCH_LIMIT), query, merged.length);
 }
 
