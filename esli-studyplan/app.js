@@ -12,6 +12,11 @@ const PACK_KEY = "esli-studyplan-pack";
 const RECENTS_KEY = "esli-studyplan-recents";
 const PROGRESS_KEY = "esli-studyplan-progress";
 
+const ECO_TSV_URLS = ["a", "b", "c", "d", "e"].map(
+  (letter) => `https://cdn.jsdelivr.net/gh/lichess-org/chess-openings@master/${letter}.tsv`,
+);
+const SEARCH_LIMIT = 40;
+
 const DIFFICULTY = {
   beginner: { maxPly: 20 },
   intermediate: { maxPly: null }, // full baked book line
@@ -38,6 +43,10 @@ const state = {
   packs: [],
   packId: "beginner",
   game: new Chess(),
+  ecoCatalog: null,
+  ecoLoading: null,
+  searchQuery: "",
+  searchTimer: null,
 };
 
 const el = {
@@ -50,7 +59,9 @@ const el = {
   tip: document.getElementById("strategy-tip"),
   learnProgress: document.getElementById("learn-progress"),
   learnStreak: document.getElementById("learn-streak"),
-  openingResults: null,
+  openingResults: document.getElementById("opening-results"),
+  openingSearch: document.getElementById("opening-search"),
+  lessonTray: document.getElementById("lesson-tray"),
   packSelect: document.getElementById("pack-select"),
   packBlurb: document.getElementById("pack-blurb"),
   lessonRow: document.getElementById("lesson-row"),
@@ -133,8 +144,8 @@ function applyRoleChrome() {
   document.getElementById("role-student")?.classList.toggle("ghost", !student);
   if (el.learnLead) {
     el.learnLead.textContent = student
-      ? "Pick a curriculum line, then play the theory moves yourself. Hints are available."
-      : "Coach through theory — Show move and Play line are teacher tools.";
+      ? "Search an opening by name, or pick a curriculum line, then play the theory moves yourself."
+      : "Search any ECO opening by name, or coach through a curriculum pack.";
   }
 }
 
@@ -179,6 +190,7 @@ function syncControls() {
   el.btnStopAuto.disabled = !state.autoplaying;
   if (el.difficultySelect) el.difficultySelect.disabled = busy;
   if (el.packSelect) el.packSelect.disabled = busy;
+  if (el.openingSearch) el.openingSearch.disabled = busy;
   updateStreakUi();
 }
 
@@ -543,6 +555,246 @@ function activePack() {
   return state.packs.find((p) => p.id === state.packId) || state.packs[0] || null;
 }
 
+function normalizeSearch(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lineFromPgn(eco, name, pgn) {
+  const game = new Chess();
+  try {
+    game.loadPgn(String(pgn || "").trim(), { strict: false });
+  } catch {
+    return null;
+  }
+  const history = game.history({ verbose: true });
+  if (!history.length) return null;
+  return {
+    eco: eco || "",
+    name: name || "Opening",
+    label: shortName(name || "Opening"),
+    tip: "ECO book line — play the main moves yourself.",
+    uci: history.map((m) => m.from + m.to + (m.promotion || "")),
+    san: history.map((m) => m.san),
+    ply: history.length,
+  };
+}
+
+function parseEcoTsv(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const row = lines[i];
+    if (!row || (i === 0 && row.startsWith("eco"))) continue;
+    const tab1 = row.indexOf("\t");
+    const tab2 = tab1 >= 0 ? row.indexOf("\t", tab1 + 1) : -1;
+    if (tab1 < 0 || tab2 < 0) continue;
+    const eco = row.slice(0, tab1).trim();
+    const name = row.slice(tab1 + 1, tab2).trim();
+    const pgn = row.slice(tab2 + 1).trim();
+    if (!name || !pgn) continue;
+    out.push({
+      eco,
+      name,
+      pgn,
+      label: shortName(name),
+      search: normalizeSearch(`${eco} ${name}`),
+      source: "eco",
+    });
+  }
+  return out;
+}
+
+async function ensureEcoCatalog() {
+  if (state.ecoCatalog) return state.ecoCatalog;
+  if (state.ecoLoading) return state.ecoLoading;
+  state.ecoLoading = (async () => {
+    const parts = await Promise.all(
+      ECO_TSV_URLS.map(async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to load ${url}`);
+        return parseEcoTsv(await res.text());
+      }),
+    );
+    state.ecoCatalog = parts.flat();
+    state.ecoLoading = null;
+    return state.ecoCatalog;
+  })().catch((err) => {
+    state.ecoLoading = null;
+    throw err;
+  });
+  return state.ecoLoading;
+}
+
+function curriculumEntries() {
+  const entries = [];
+  for (const pack of state.packs) {
+    for (const line of pack.lines || []) {
+      const name = line.name || line.label || line.q || "";
+      entries.push({
+        ...line,
+        name,
+        label: line.label || shortName(name),
+        search: normalizeSearch(`${line.eco || ""} ${name} ${line.label || ""} ${line.q || ""}`),
+        source: "curriculum",
+        packLabel: pack.label,
+        packId: pack.id,
+      });
+    }
+  }
+  return entries;
+}
+
+function scoreMatch(entry, tokens) {
+  if (!tokens.length) return 0;
+  const hay = entry.search || "";
+  let score = 0;
+  for (const token of tokens) {
+    if (!hay.includes(token)) return -1;
+    if (hay.startsWith(token)) score += 8;
+    else if (hay.includes(` ${token}`)) score += 5;
+    else score += 2;
+    if ((entry.eco || "").toLowerCase() === token) score += 10;
+  }
+  if (entry.source === "curriculum") score += 4;
+  score += Math.max(0, 6 - Math.floor((entry.name || "").length / 18));
+  return score;
+}
+
+function renderSearchStatus(text) {
+  if (!el.openingResults) return;
+  el.openingResults.hidden = false;
+  el.openingResults.innerHTML = `<li class="or-status">${text}</li>`;
+  el.lessonTray?.classList.add("is-searching");
+}
+
+function clearSearchResults() {
+  if (!el.openingResults) return;
+  el.openingResults.hidden = true;
+  el.openingResults.innerHTML = "";
+  el.lessonTray?.classList.remove("is-searching");
+}
+
+function renderSearchResults(matches, query) {
+  if (!el.openingResults) return;
+  if (!query) {
+    clearSearchResults();
+    return;
+  }
+  el.openingResults.hidden = false;
+  el.lessonTray?.classList.add("is-searching");
+  el.openingResults.innerHTML = "";
+  if (!matches.length) {
+    el.openingResults.innerHTML = `<li class="or-empty">No openings match “${query}”</li>`;
+    return;
+  }
+  matches.forEach((entry) => {
+    const li = document.createElement("li");
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    const ply = Array.isArray(entry.uci)
+      ? entry.uci.length
+      : String(entry.pgn || "")
+          .split(/\s+/)
+          .filter((tok) => tok && !/^\d+\.+?$/.test(tok) && tok !== "*" && tok !== "...")
+          .length;
+    const where = entry.source === "curriculum"
+      ? `${entry.packLabel || "Curriculum"} pack`
+      : "ECO book";
+    li.innerHTML = `<div class="or-name">${entry.name}</div><div class="or-meta">${entry.eco || "—"} · ${where}${ply ? ` · ${ply} ply` : ""}</div>`;
+    const pick = () => pickSearchResult(entry);
+    li.addEventListener("click", pick);
+    li.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        pick();
+      }
+    });
+    el.openingResults.appendChild(li);
+  });
+}
+
+function pickSearchResult(entry) {
+  if (isBusy()) return;
+  if (entry.source === "eco" && !entry.uci?.length) {
+    const line = lineFromPgn(entry.eco, entry.name, entry.pgn);
+    if (!line) {
+      setChip("error", "Could not load line");
+      setStatus(`Could not parse moves for ${entry.name}`);
+      return;
+    }
+    startPractice(line);
+    return;
+  }
+  startPractice(entry);
+}
+
+async function runOpeningSearch(rawQuery) {
+  const query = String(rawQuery || "").trim();
+  state.searchQuery = query;
+  if (!query) {
+    clearSearchResults();
+    return;
+  }
+  const tokens = normalizeSearch(query).split(" ").filter(Boolean);
+  if (!tokens.length) {
+    clearSearchResults();
+    return;
+  }
+
+  const local = curriculumEntries()
+    .map((entry) => ({ entry, score: scoreMatch(entry, tokens) }))
+    .filter((row) => row.score >= 0)
+    .sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
+    .map((row) => row.entry);
+
+  renderSearchStatus("Searching ECO book…");
+  let eco = [];
+  try {
+    const catalog = await ensureEcoCatalog();
+    if (state.searchQuery !== query) return;
+    eco = catalog
+      .map((entry) => ({ entry, score: scoreMatch(entry, tokens) }))
+      .filter((row) => row.score >= 0)
+      .sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
+      .map((row) => row.entry);
+  } catch {
+    if (state.searchQuery !== query) return;
+    if (!local.length) {
+      renderSearchResults([], query);
+      setChip("error", "Search offline");
+      return;
+    }
+  }
+  if (state.searchQuery !== query) return;
+
+  const seen = new Set();
+  const merged = [];
+  for (const entry of [...local, ...eco]) {
+    const key = `${entry.eco || ""}|${normalizeSearch(entry.name)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(entry);
+    if (merged.length >= SEARCH_LIMIT) break;
+  }
+  renderSearchResults(merged, query);
+}
+
+function scheduleOpeningSearch(value) {
+  if (state.searchTimer) window.clearTimeout(state.searchTimer);
+  state.searchTimer = window.setTimeout(() => {
+    runOpeningSearch(value).catch((err) => {
+      setStatus(`Search failed: ${err.message}`);
+      setChip("error", "Search error");
+    });
+  }, 160);
+}
+
 function renderPackSelect() {
   el.packSelect.innerHTML = "";
   state.packs.forEach((pack) => {
@@ -722,6 +974,11 @@ document.getElementById("btn-stop-auto").addEventListener("click", () => {
 });
 el.difficultySelect.addEventListener("change", (e) => setDifficulty(e.target.value));
 el.packSelect.addEventListener("change", (e) => setPack(e.target.value));
+el.openingSearch?.addEventListener("input", (e) => scheduleOpeningSearch(e.target.value));
+el.openingSearch?.addEventListener("search", (e) => scheduleOpeningSearch(e.target.value));
+el.openingSearch?.addEventListener("focus", () => {
+  ensureEcoCatalog().catch(() => {});
+});
 document.getElementById("toggle-coords").addEventListener("change", (e) => {
   state.showCoords = e.target.checked;
   renderBoard();
