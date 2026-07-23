@@ -15,7 +15,8 @@ const PROGRESS_KEY = "esli-studyplan-progress";
 const ECO_TSV_URLS = ["a", "b", "c", "d", "e"].map(
   (letter) => `https://cdn.jsdelivr.net/gh/lichess-org/chess-openings@master/${letter}.tsv`,
 );
-const SEARCH_LIMIT = 40;
+const SEARCH_LIMIT = 80;
+const DB_LABEL = "Lichess ECO openings";
 
 const DIFFICULTY = {
   beginner: { maxPly: 20 },
@@ -47,6 +48,11 @@ const state = {
   ecoLoading: null,
   searchQuery: "",
   searchTimer: null,
+  searchMatches: [],
+  searchMatchTotal: 0,
+  searchActiveIndex: -1,
+  browseMode: false,
+  browseBackup: null,
 };
 
 const el = {
@@ -61,6 +67,12 @@ const el = {
   learnStreak: document.getElementById("learn-streak"),
   openingResults: document.getElementById("opening-results"),
   openingSearch: document.getElementById("opening-search"),
+  searchDbStatus: document.getElementById("search-db-status"),
+  searchReader: document.getElementById("search-reader"),
+  readerKicker: document.getElementById("reader-kicker"),
+  readerPgn: document.getElementById("reader-pgn"),
+  readerHint: document.getElementById("reader-hint"),
+  btnPracticeResult: document.getElementById("btn-practice-result"),
   lessonTray: document.getElementById("lesson-tray"),
   packSelect: document.getElementById("pack-select"),
   packBlurb: document.getElementById("pack-blurb"),
@@ -144,8 +156,8 @@ function applyRoleChrome() {
   document.getElementById("role-student")?.classList.toggle("ghost", !student);
   if (el.learnLead) {
     el.learnLead.textContent = student
-      ? "Search an opening by name, or pick a curriculum line, then play the theory moves yourself."
-      : "Search any ECO opening by name, or coach through a curriculum pack.";
+      ? "Search the openings database, read the line, then practice the moves yourself."
+      : "Search the openings database, read through matches, then coach the line.";
   }
 }
 
@@ -303,7 +315,7 @@ function selectSquare(sq) {
 }
 
 function onSquareClick(sq) {
-  if (isBusy()) return;
+  if (isBusy() || state.browseMode) return;
   if (state.selected === null) {
     selectSquare(sq);
     return;
@@ -318,6 +330,7 @@ function onSquareClick(sq) {
 }
 
 function tryMoveFromTo(from, to) {
+  if (state.browseMode) return;
   const fromName = sqName(from);
   const toName = sqName(to);
   const candidates = state.legal.filter((m) => m.startsWith(fromName + toName));
@@ -351,6 +364,9 @@ function lineForDifficulty(op) {
 function startPractice(op) {
   if (isBusy() || !op?.uci?.length) return;
   state.stopAutoplay = true;
+  state.browseMode = false;
+  state.browseBackup = null;
+  document.body.classList.remove("is-browsing-search");
   state.practice = lineForDifficulty(op);
   state.practiceIndex = 0;
   state.moves = [];
@@ -565,6 +581,23 @@ function normalizeSearch(text) {
     .trim();
 }
 
+function formatSanLine(san) {
+  if (!Array.isArray(san) || !san.length) return "";
+  const parts = [];
+  for (let i = 0; i < san.length; i += 1) {
+    if (i % 2 === 0) parts.push(`${Math.floor(i / 2) + 1}.`);
+    parts.push(san[i]);
+  }
+  return parts.join(" ");
+}
+
+function plyFromPgn(pgn) {
+  return String(pgn || "")
+    .split(/\s+/)
+    .filter((tok) => tok && !/^\d+\.+?$/.test(tok) && tok !== "*" && tok !== "...")
+    .length;
+}
+
 function lineFromPgn(eco, name, pgn) {
   const game = new Chess();
   try {
@@ -578,11 +611,39 @@ function lineFromPgn(eco, name, pgn) {
     eco: eco || "",
     name: name || "Opening",
     label: shortName(name || "Opening"),
-    tip: "ECO book line — play the main moves yourself.",
+    tip: "ECO book line — read the moves, then practice them yourself.",
     uci: history.map((m) => m.from + m.to + (m.promotion || "")),
     san: history.map((m) => m.san),
+    pgn: formatSanLine(history.map((m) => m.san)) || String(pgn || "").trim(),
     ply: history.length,
   };
+}
+
+function resolveOpeningEntry(entry) {
+  if (!entry) return null;
+  if (Array.isArray(entry.uci) && entry.uci.length) {
+    const san = Array.isArray(entry.san) && entry.san.length
+      ? entry.san
+      : [];
+    return {
+      eco: entry.eco || "",
+      name: entry.name || entry.label || "Opening",
+      label: entry.label || shortName(entry.name || "Opening"),
+      tip: entry.tip || "Curriculum line — read the moves, then practice them yourself.",
+      uci: entry.uci.slice(),
+      san: san.slice(),
+      pgn: formatSanLine(san) || entry.pgn || "",
+      ply: entry.uci.length,
+      source: entry.source || "curriculum",
+      packLabel: entry.packLabel,
+    };
+  }
+  if (entry._resolved) return entry._resolved;
+  const line = lineFromPgn(entry.eco, entry.name, entry.pgn);
+  if (!line) return null;
+  line.source = entry.source || "eco";
+  entry._resolved = line;
+  return line;
 }
 
 function parseEcoTsv(text) {
@@ -605,14 +666,22 @@ function parseEcoTsv(text) {
       label: shortName(name),
       search: normalizeSearch(`${eco} ${name}`),
       source: "eco",
+      plyEstimate: plyFromPgn(pgn),
     });
   }
   return out;
 }
 
+function setDbStatus(stateName, text) {
+  if (!el.searchDbStatus) return;
+  el.searchDbStatus.dataset.state = stateName || "";
+  el.searchDbStatus.textContent = text;
+}
+
 async function ensureEcoCatalog() {
   if (state.ecoCatalog) return state.ecoCatalog;
   if (state.ecoLoading) return state.ecoLoading;
+  setDbStatus("loading", `Loading ${DB_LABEL}…`);
   state.ecoLoading = (async () => {
     const parts = await Promise.all(
       ECO_TSV_URLS.map(async (url) => {
@@ -623,9 +692,11 @@ async function ensureEcoCatalog() {
     );
     state.ecoCatalog = parts.flat();
     state.ecoLoading = null;
+    setDbStatus("ready", `${DB_LABEL} · ${state.ecoCatalog.length.toLocaleString()} lines ready`);
     return state.ecoCatalog;
   })().catch((err) => {
     state.ecoLoading = null;
+    setDbStatus("error", "Openings database unavailable — curriculum search only");
     throw err;
   });
   return state.ecoLoading;
@@ -636,14 +707,17 @@ function curriculumEntries() {
   for (const pack of state.packs) {
     for (const line of pack.lines || []) {
       const name = line.name || line.label || line.q || "";
+      const san = Array.isArray(line.san) ? line.san : [];
       entries.push({
         ...line,
         name,
         label: line.label || shortName(name),
+        pgn: formatSanLine(san),
         search: normalizeSearch(`${line.eco || ""} ${name} ${line.label || ""} ${line.q || ""}`),
         source: "curriculum",
         packLabel: pack.label,
         packId: pack.id,
+        plyEstimate: Array.isArray(line.uci) ? line.uci.length : plyFromPgn(line.pgn),
       });
     }
   }
@@ -666,72 +740,256 @@ function scoreMatch(entry, tokens) {
   return score;
 }
 
+function snapshotBoardState() {
+  return {
+    practice: state.practice,
+    practiceIndex: state.practiceIndex,
+    moves: state.moves.slice(),
+    fen: state.fen,
+    lastMove: state.lastMove ? { ...state.lastMove } : null,
+    hint: state.hint ? { ...state.hint } : null,
+    streak: state.streak,
+    eco: el.eco.textContent,
+    openingName: el.openingName.textContent,
+    openingMeta: el.openingMeta.textContent,
+    tip: el.tip.textContent,
+    status: el.status.textContent,
+    chipKind: el.chip.dataset.kind,
+    chipText: el.chip.textContent,
+  };
+}
+
+function restoreBoardSnapshot(snap) {
+  if (!snap) return;
+  state.practice = snap.practice;
+  state.practiceIndex = snap.practiceIndex;
+  state.moves = snap.moves.slice();
+  state.lastMove = snap.lastMove;
+  state.hint = snap.hint;
+  state.streak = snap.streak;
+  state.selected = null;
+  state.targets = new Set();
+  state.game = new Chess();
+  state.fen = state.game.fen();
+  for (const u of state.moves) {
+    const from = u.slice(0, 2);
+    const to = u.slice(2, 4);
+    const promotion = u.length > 4 ? u[4] : undefined;
+    const move = state.game.move({ from, to, promotion });
+    if (!move) break;
+    state.lastMove = { from: parseSq(from), to: parseSq(to) };
+  }
+  state.fen = state.game.fen();
+  refreshLegal();
+  el.eco.textContent = snap.eco;
+  el.openingName.textContent = snap.openingName;
+  el.openingMeta.textContent = snap.openingMeta;
+  el.tip.textContent = snap.tip;
+  setStatus(snap.status);
+  setChip(snap.chipKind, snap.chipText);
+  updateLearnProgress();
+  updateStreakUi();
+  renderBoard();
+  syncControls();
+}
+
+function showPreviewBoard(line) {
+  const game = new Chess();
+  let last = null;
+  for (const u of line.uci || []) {
+    const from = u.slice(0, 2);
+    const to = u.slice(2, 4);
+    const promotion = u.length > 4 ? u[4] : undefined;
+    const move = game.move({ from, to, promotion });
+    if (!move) break;
+    last = { from: parseSq(from), to: parseSq(to) };
+  }
+  state.fen = game.fen();
+  state.game = game;
+  state.lastMove = last;
+  state.selected = null;
+  state.targets = new Set();
+  state.hint = null;
+  state.moves = (line.uci || []).slice();
+  state.practice = null;
+  state.practiceIndex = 0;
+  refreshLegal();
+  renderBoard();
+  if (el.pgnStrip) {
+    el.pgnStrip.innerHTML = "";
+    const sans = line.san || [];
+    for (let i = 0; i < (line.uci || []).length; i += 1) {
+      if (i % 2 === 0) {
+        const num = document.createElement("span");
+        num.className = "num";
+        num.textContent = `${i / 2 + 1}.`;
+        el.pgnStrip.appendChild(num);
+      }
+      const span = document.createElement("span");
+      span.className = "ply on";
+      span.textContent = sans[i] || line.uci[i];
+      el.pgnStrip.appendChild(span);
+    }
+  }
+  if (el.learnProgress) el.learnProgress.textContent = `Browse · ${(line.uci || []).length} ply`;
+}
+
+function setSearchExpanded(open) {
+  if (el.openingSearch) el.openingSearch.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function renderSearchStatus(text) {
   if (!el.openingResults) return;
   el.openingResults.hidden = false;
+  setSearchExpanded(true);
   el.openingResults.innerHTML = `<li class="or-status">${text}</li>`;
   el.lessonTray?.classList.add("is-searching");
+  if (el.searchReader) el.searchReader.hidden = true;
+}
+
+function exitBrowseMode({ restore = true } = {}) {
+  document.body.classList.remove("is-browsing-search");
+  state.browseMode = false;
+  state.searchActiveIndex = -1;
+  state.searchMatches = [];
+  state.searchMatchTotal = 0;
+  if (el.searchReader) el.searchReader.hidden = true;
+  if (el.openingResults) {
+    el.openingResults.hidden = true;
+    el.openingResults.innerHTML = "";
+  }
+  setSearchExpanded(false);
+  el.lessonTray?.classList.remove("is-searching");
+  if (restore && state.browseBackup) {
+    restoreBoardSnapshot(state.browseBackup);
+    state.browseBackup = null;
+  } else {
+    state.browseBackup = null;
+  }
 }
 
 function clearSearchResults() {
-  if (!el.openingResults) return;
-  el.openingResults.hidden = true;
-  el.openingResults.innerHTML = "";
-  el.lessonTray?.classList.remove("is-searching");
+  exitBrowseMode({ restore: true });
 }
 
-function renderSearchResults(matches, query) {
+function updateActiveResultChrome() {
+  if (!el.openingResults) return;
+  const items = [...el.openingResults.querySelectorAll('[role="option"]')];
+  items.forEach((node, idx) => {
+    const on = idx === state.searchActiveIndex;
+    node.classList.toggle("is-active", on);
+    node.setAttribute("aria-selected", on ? "true" : "false");
+    if (on) {
+      node.scrollIntoView({ block: "nearest" });
+      if (el.openingSearch) el.openingSearch.setAttribute("aria-activedescendant", node.id);
+    }
+  });
+}
+
+function browseSearchIndex(index) {
+  if (!state.searchMatches.length) return;
+  const next = Math.max(0, Math.min(index, state.searchMatches.length - 1));
+  state.searchActiveIndex = next;
+  updateActiveResultChrome();
+  previewSearchResult(state.searchMatches[next], next);
+}
+
+function previewSearchResult(entry, index = state.searchActiveIndex) {
+  if (isBusy() || !entry) return;
+  const line = resolveOpeningEntry(entry);
+  if (!line) {
+    setChip("error", "Could not read line");
+    return;
+  }
+  if (!state.browseMode) {
+    state.browseBackup = snapshotBoardState();
+    state.browseMode = true;
+    document.body.classList.add("is-browsing-search");
+  }
+  state.searchActiveIndex = index;
+  showPreviewBoard(line);
+  el.eco.textContent = line.eco || "—";
+  el.openingName.textContent = line.name;
+  const where = line.source === "curriculum"
+    ? `${line.packLabel || "Curriculum"} pack`
+    : DB_LABEL;
+  el.openingMeta.textContent = `Reading · ${line.uci.length} ply · ${where}`;
+  el.tip.textContent = line.tip || "";
+  setStatus("Read the line, then practice — or keep browsing results");
+  setChip("hint", "Browsing");
+  if (el.searchReader) el.searchReader.hidden = false;
+  if (el.readerKicker) {
+    el.readerKicker.textContent = `${index + 1} of ${state.searchMatches.length} · ${line.eco || "ECO"}`;
+  }
+  if (el.readerPgn) el.readerPgn.textContent = line.pgn || formatSanLine(line.san) || "—";
+  updateActiveResultChrome();
+  syncControls();
+}
+
+function pickSearchResult(entry) {
+  if (isBusy()) return;
+  const line = resolveOpeningEntry(entry);
+  if (!line) {
+    setChip("error", "Could not load line");
+    setStatus(`Could not parse moves for ${entry?.name || "opening"}`);
+    return;
+  }
+  state.browseBackup = null;
+  state.browseMode = false;
+  document.body.classList.remove("is-browsing-search");
+  if (el.searchReader) el.searchReader.hidden = true;
+  startPractice(line);
+}
+
+function practiceActiveSearchResult() {
+  if (state.searchActiveIndex < 0) return;
+  const entry = state.searchMatches[state.searchActiveIndex];
+  if (entry) pickSearchResult(entry);
+}
+
+function renderSearchResults(matches, query, total) {
   if (!el.openingResults) return;
   if (!query) {
     clearSearchResults();
     return;
   }
+  state.searchMatches = matches;
+  state.searchMatchTotal = total;
   el.openingResults.hidden = false;
+  setSearchExpanded(true);
   el.lessonTray?.classList.add("is-searching");
   el.openingResults.innerHTML = "";
   if (!matches.length) {
     el.openingResults.innerHTML = `<li class="or-empty">No openings match “${query}”</li>`;
+    if (el.searchReader) el.searchReader.hidden = true;
     return;
   }
-  matches.forEach((entry) => {
+
+  const count = document.createElement("li");
+  count.className = "or-count";
+  count.textContent = total > matches.length
+    ? `Showing ${matches.length} of ${total.toLocaleString()} matches · ↑↓ to read`
+    : `${matches.length} match${matches.length === 1 ? "" : "es"} · ↑↓ to read`;
+  el.openingResults.appendChild(count);
+
+  matches.forEach((entry, idx) => {
     const li = document.createElement("li");
-    li.tabIndex = 0;
-    li.setAttribute("role", "button");
-    const ply = Array.isArray(entry.uci)
-      ? entry.uci.length
-      : String(entry.pgn || "")
-          .split(/\s+/)
-          .filter((tok) => tok && !/^\d+\.+?$/.test(tok) && tok !== "*" && tok !== "...")
-          .length;
+    li.id = `opening-result-${idx}`;
+    li.tabIndex = -1;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", "false");
+    const ply = entry.plyEstimate || entry.uci?.length || plyFromPgn(entry.pgn);
     const where = entry.source === "curriculum"
       ? `${entry.packLabel || "Curriculum"} pack`
-      : "ECO book";
-    li.innerHTML = `<div class="or-name">${entry.name}</div><div class="or-meta">${entry.eco || "—"} · ${where}${ply ? ` · ${ply} ply` : ""}</div>`;
-    const pick = () => pickSearchResult(entry);
-    li.addEventListener("click", pick);
-    li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        pick();
-      }
-    });
+      : "ECO database";
+    const pgnText = entry.pgn || formatSanLine(entry.san) || "";
+    li.innerHTML = `<div class="or-name">${entry.name}</div><div class="or-meta">${entry.eco || "—"} · ${where}${ply ? ` · ${ply} ply` : ""}</div>${pgnText ? `<div class="or-pgn">${pgnText}</div>` : ""}`;
+    li.addEventListener("click", () => browseSearchIndex(idx));
+    li.addEventListener("dblclick", () => pickSearchResult(entry));
     el.openingResults.appendChild(li);
   });
-}
 
-function pickSearchResult(entry) {
-  if (isBusy()) return;
-  if (entry.source === "eco" && !entry.uci?.length) {
-    const line = lineFromPgn(entry.eco, entry.name, entry.pgn);
-    if (!line) {
-      setChip("error", "Could not load line");
-      setStatus(`Could not parse moves for ${entry.name}`);
-      return;
-    }
-    startPractice(line);
-    return;
-  }
-  startPractice(entry);
+  browseSearchIndex(0);
 }
 
 async function runOpeningSearch(rawQuery) {
@@ -753,7 +1011,7 @@ async function runOpeningSearch(rawQuery) {
     .sort((a, b) => b.score - a.score || a.entry.name.localeCompare(b.entry.name))
     .map((row) => row.entry);
 
-  renderSearchStatus("Searching ECO book…");
+  renderSearchStatus(`Searching ${DB_LABEL}…`);
   let eco = [];
   try {
     const catalog = await ensureEcoCatalog();
@@ -766,7 +1024,7 @@ async function runOpeningSearch(rawQuery) {
   } catch {
     if (state.searchQuery !== query) return;
     if (!local.length) {
-      renderSearchResults([], query);
+      renderSearchResults([], query, 0);
       setChip("error", "Search offline");
       return;
     }
@@ -780,9 +1038,8 @@ async function runOpeningSearch(rawQuery) {
     if (seen.has(key)) continue;
     seen.add(key);
     merged.push(entry);
-    if (merged.length >= SEARCH_LIMIT) break;
   }
-  renderSearchResults(merged, query);
+  renderSearchResults(merged.slice(0, SEARCH_LIMIT), query, merged.length);
 }
 
 function scheduleOpeningSearch(value) {
@@ -792,7 +1049,27 @@ function scheduleOpeningSearch(value) {
       setStatus(`Search failed: ${err.message}`);
       setChip("error", "Search error");
     });
-  }, 160);
+  }, 120);
+}
+
+function onOpeningSearchKeydown(e) {
+  if (!state.searchMatches.length && !["Escape"].includes(e.key)) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    browseSearchIndex(state.searchActiveIndex < 0 ? 0 : state.searchActiveIndex + 1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    browseSearchIndex(state.searchActiveIndex <= 0 ? 0 : state.searchActiveIndex - 1);
+  } else if (e.key === "Enter") {
+    if (state.searchActiveIndex >= 0) {
+      e.preventDefault();
+      practiceActiveSearchResult();
+    }
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    if (el.openingSearch) el.openingSearch.value = "";
+    clearSearchResults();
+  }
 }
 
 function renderPackSelect() {
@@ -956,6 +1233,7 @@ async function boot() {
   renderBoard();
   syncControls();
   setStatus("Pick a curriculum line to begin");
+  ensureEcoCatalog().catch(() => {});
 }
 
 document.getElementById("role-teacher").addEventListener("click", () => setRole("teacher"));
@@ -976,9 +1254,11 @@ el.difficultySelect.addEventListener("change", (e) => setDifficulty(e.target.val
 el.packSelect.addEventListener("change", (e) => setPack(e.target.value));
 el.openingSearch?.addEventListener("input", (e) => scheduleOpeningSearch(e.target.value));
 el.openingSearch?.addEventListener("search", (e) => scheduleOpeningSearch(e.target.value));
+el.openingSearch?.addEventListener("keydown", onOpeningSearchKeydown);
 el.openingSearch?.addEventListener("focus", () => {
   ensureEcoCatalog().catch(() => {});
 });
+el.btnPracticeResult?.addEventListener("click", () => practiceActiveSearchResult());
 document.getElementById("toggle-coords").addEventListener("change", (e) => {
   state.showCoords = e.target.checked;
   renderBoard();

@@ -18,7 +18,8 @@ python3 -m http.server 8080
 
 ## Features
 
-- Search openings by name across curriculum packs and the full ECO book
+- Search the Lichess ECO openings database (~3,800 lines) by name
+- Read-through results: ↑↓ browse, live board preview, PGN reader, Enter to practice
 - Beginner / Club / Advanced curriculum packs
 - Teacher vs Student classroom roles
 - Difficulty caps, hints, streaks, local progress

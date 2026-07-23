@@ -74,17 +74,38 @@
               </select>
             </label>
           </div>
-          <div class="search-row">
-            <input
-              type="search"
-              id="opening-search"
-              placeholder="Search openings by name…"
-              aria-label="Search openings by name"
-              autocomplete="off"
-              spellcheck="false"
-            />
+          <div class="search-shell" id="search-shell">
+            <div class="search-row">
+              <input
+                type="search"
+                id="opening-search"
+                placeholder="Search the openings database…"
+                aria-label="Search the chess openings database"
+                aria-controls="opening-results"
+                aria-autocomplete="list"
+                aria-expanded="false"
+                role="combobox"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <p class="search-db" id="search-db-status">Connecting to openings database…</p>
+            <div class="search-reader" id="search-reader" hidden>
+              <p class="reader-kicker" id="reader-kicker">Browse result</p>
+              <p class="reader-pgn" id="reader-pgn"></p>
+              <div class="reader-actions">
+                <button type="button" class="btn accent" id="btn-practice-result">Practice this line</button>
+                <span class="reader-hint" id="reader-hint">↑↓ read · Enter practice · Esc clear</span>
+              </div>
+            </div>
+            <ul
+              class="opening-results"
+              id="opening-results"
+              role="listbox"
+              aria-label="Opening search results"
+              hidden
+            ></ul>
           </div>
-          <ul class="opening-results" id="opening-results" hidden></ul>
           <div class="tray-block" id="lesson-tray">
             <p class="tray-label">Curriculum</p>
             <label class="pack-select-label">Pack
