@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Esli Study Plan</title>
+  <meta name="description" content="Esli Study Plan — classroom chess openings trainer" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./app.css" />
+  <base href="./" />
+</head>
+<body class="role-teacher">
+  <div class="atmosphere" aria-hidden="true"></div>
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark">Esli</span>
+      <span class="brand-sub">Study Plan</span>
+    </div>
+    <div class="controls">
+      <div class="mode-switch role-switch" role="group" aria-label="Classroom role" id="role-switch">
+        <button type="button" class="btn mode on" id="role-teacher">Teacher</button>
+        <button type="button" class="btn mode ghost" id="role-student">Student</button>
+      </div>
+      <button type="button" id="btn-restart-line" class="btn ghost">Restart line</button>
+      <button type="button" id="btn-flip" class="btn ghost">Flip</button>
+      <button type="button" id="btn-undo" class="btn ghost">Undo</button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="board-plane">
+      <div class="eval-rail hidden" id="eval-rail" aria-hidden="true"></div>
+      <div class="board-wrap">
+        <div id="board" class="board" role="grid" aria-label="Chess board"></div>
+        <div class="status-row">
+          <p class="status" id="status">Pick a curriculum line to begin</p>
+          <span class="status-chip" id="status-chip" data-kind="idle">Ready</span>
+        </div>
+        <div class="board-toggles">
+          <label><input type="checkbox" id="toggle-coords" checked /> Coordinates</label>
+        </div>
+        <div class="learn-bar" id="learn-bar">
+          <button type="button" class="btn ghost" id="btn-hint">Hint</button>
+          <button type="button" class="btn ghost teacher-only" id="btn-show-move">Show move</button>
+          <button type="button" class="btn accent teacher-only" id="btn-auto">Play line</button>
+          <button type="button" class="btn danger hidden" id="btn-stop-auto">Stop</button>
+          <span class="learn-progress" id="learn-progress"></span>
+          <span class="learn-streak" id="learn-streak">streak 0</span>
+        </div>
+        <div class="pgn-strip" id="pgn-strip" aria-label="Practice moves"></div>
+      </div>
+    </section>
+
+    <aside class="analysis" id="analysis">
+      <div class="opening-block">
+        <p class="eyebrow" id="eco">—</p>
+        <h1 class="opening-name" id="opening-name">Esli Study Plan</h1>
+        <p class="opening-meta" id="opening-meta">Classroom openings trainer</p>
+        <p class="strategy-tip" id="strategy-tip"></p>
+      </div>
+
+      <div id="learn-panel" class="learn-panel">
+        <section class="panel">
+          <h2>Opening trainer</h2>
+          <p class="panel-lead" id="learn-lead">Pick a curriculum line, then move the pieces yourself through theory.</p>
+          <div class="teach-row">
+            <label class="depth-label">Difficulty
+              <select id="difficulty-select" aria-label="Difficulty">
+                <option value="beginner">Beginner · 10 moves</option>
+                <option value="intermediate" selected>Intermediate · book</option>
+                <option value="advanced">Advanced · full line</option>
+              </select>
+            </label>
+          </div>
+          <div class="tray-block" id="lesson-tray">
+            <p class="tray-label">Curriculum</p>
+            <label class="pack-select-label">Pack
+              <select id="pack-select" aria-label="Curriculum pack"></select>
+            </label>
+            <p class="pack-blurb" id="pack-blurb"></p>
+            <div class="tray-row" id="lesson-row"></div>
+          </div>
+          <div class="tray-block" id="recents-tray">
+            <p class="tray-label">Recent</p>
+            <div class="tray-row" id="recents-row"><span class="tray-empty">None yet</span></div>
+          </div>
+          <div class="tray-block" id="progress-tray">
+            <p class="tray-label">Progress</p>
+            <p class="progress-summary" id="progress-summary">No lines completed yet</p>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
